@@ -1,10 +1,14 @@
 import numpy as np
 import collections
 from collections import defaultdict, OrderedDict
-from transformers import Trainer, EvalPrediction
+from transformers import Trainer, EvalPrediction, TrainerCallback
 from transformers.trainer_utils import PredictionOutput
 from typing import Tuple
 from tqdm.auto import tqdm
+from selection.selection_utils import log_training_dynamics
+from torch.utils.data import DataLoader, Dataset, RandomSampler, SequentialSampler
+import torch
+from transformers.trainer_pt_utils import IterableDatasetShard
 
 QA_MAX_ANSWER_LENGTH = 30
 
@@ -66,6 +70,7 @@ def prepare_train_dataset_qa(examples, tokenizer, max_seq_length=None):
 
     tokenized_examples["start_positions"] = []
     tokenized_examples["end_positions"] = []
+    tokenized_examples["example_id"] = []
 
     for i, offsets in enumerate(offset_mapping):
         input_ids = tokenized_examples["input_ids"][i]
@@ -76,6 +81,8 @@ def prepare_train_dataset_qa(examples, tokenizer, max_seq_length=None):
         sample_index = sample_mapping[i]
         # get the answer for a feature
         answers = examples["answers"][sample_index]
+
+        tokenized_examples["example_id"].append(examples["id"][sample_index])
 
         if len(answers["answer_start"]) == 0:
             tokenized_examples["start_positions"].append(cls_index)
@@ -251,11 +258,160 @@ def postprocess_qa_predictions(examples,
     return all_predictions
 
 
+class MyCallback(TrainerCallback):
+    def __init__(self, trainer_class):
+        super().__init__()
+        self.trainer_class = trainer_class
+        self.args = trainer_class.args
+        # print("\n\n*************** MyCallback init...")
+        # print("\n\n*************** MyCallback args:", trainer_class.args)
+
+    "A callback that prints a message at the beginning of training"
+
+    def on_epoch_end(self, args, state, control, **kwargs):
+        print("\n\n************ on_epoch_end:", state.epoch)
+
+        start_dir = self.args.output_dir + "/start_pos"
+        end_dir = self.args.output_dir + "/end_pos"
+        # print("\n\n************ on_epoch_end start_dir:", start_dir)
+        # print("\n\n************ on_epoch_end end_dir:", end_dir)
+        self.trainer_class.train_dynamic(start_dir, int(state.epoch), self.trainer_class.cur_train_ids,
+                                         self.trainer_class.cur_train_start_logits,
+                                         self.trainer_class.cur_train_start_golds)
+        self.trainer_class.train_dynamic(end_dir, int(state.epoch), self.trainer_class.cur_train_ids,
+                                         self.trainer_class.cur_train_end_logits,
+                                         self.trainer_class.cur_train_end_golds)
+        self.trainer_class.cur_train_ids = []
+        self.trainer_class.cur_train_start_logits = []
+        self.trainer_class.cur_train_start_golds = []
+        self.trainer_class.cur_train_end_logits = []
+        self.trainer_class.cur_train_end_golds = []
+
+
 # Adapted from https://github.com/huggingface/transformers/blob/master/examples/pytorch/question-answering/trainer_qa.py
 class QuestionAnsweringTrainer(Trainer):
     def __init__(self, *args, eval_examples=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.eval_examples = eval_examples
+        # self.args = args
+        # self.cur_num_epoch = 0
+        self.cur_train_ids = []
+        self.cur_train_start_logits = []
+        self.cur_train_start_golds = []
+        self.cur_train_end_logits = []
+        self.cur_train_end_golds = []
+
+    def train_dynamic(self, output_dir, epoch, train_ids, train_logits, train_golds):
+        log_training_dynamics(output_dir=output_dir,
+                              epoch=epoch,
+                              train_ids=list(train_ids),
+                              train_logits=list(train_logits),
+                              train_golds=list(train_golds))
+
+    def compute_loss(self, model, inputs, return_outputs=False):
+        """
+        How the loss is computed by Trainer. By default, all models return the loss in the first element.
+
+        Subclass and override for custom behavior.
+        """
+        # print("\n\n*********************** before inputs:", inputs, "\n\n")
+        old_inputs = inputs.copy()
+        del inputs['example_id']
+        # print("\n\n*********************** after inputs:", inputs, "\n\n")
+
+        if self.label_smoother is not None and "labels" in inputs:
+            labels = inputs.pop("labels")
+        else:
+            labels = None
+
+        outputs = model(**inputs)
+        # Save past state if it exists
+        # TODO: this needs to be fixed and made cleaner later.
+        if self.args.past_index >= 0:
+            self._past = outputs[self.args.past_index]
+
+        if labels is not None:
+            loss = self.label_smoother(outputs, labels)
+        else:
+            # We don't use .loss here since the model may return tuples instead of ModelOutput.
+            loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
+
+        # track the info
+        # print("\n\n*********************** inputs:", inputs.shape, ", outputs:", outputs.shape, ", labels:", labels, "\n\n")
+        # print("\n\n*********************** labels:", labels, "\n\n")
+        # print("\n\n*********************** after inputs:", inputs, "\n\n")
+        # print("\n\n*********************** outputs:", outputs, "\n\n")
+        # print("*********************** inputs['end_positions']:", inputs['end_positions'].shape)
+        # print("*********************** inputs['start_positions']:", inputs['start_positions'].shape)
+        # print("*********************** inputs['input_ids']:", inputs['input_ids'].shape)
+        # print("*********************** inputs['token_type_ids']:", inputs['token_type_ids'].shape)
+        # print("*********************** inputs['attention_mask']:", inputs['attention_mask'].shape)
+        # print("*********************** outputs['start_logits']:", outputs['start_logits'].shape)
+        # print("*********************** outputs['end_logits']:", outputs['end_logits'].shape)
+        # old_inputs['end_positions']
+        # old_inputs['start_positions']
+        # old_inputs['input_ids']
+        # old_inputs['token_type_ids']
+        # old_inputs['attention_mask']
+        # old_inputs['example_id']
+
+        # outputs['start_logits']
+        # outputs['end_logits']
+
+        self.cur_train_ids.append(old_inputs['example_id'].detach().cpu().numpy())
+        self.cur_train_start_logits.append(outputs['start_logits'].detach().cpu().numpy())
+        self.cur_train_start_golds.append(old_inputs['start_positions'].detach().cpu().numpy())
+        self.cur_train_end_logits.append(outputs['end_logits'].detach().cpu().numpy())
+        self.cur_train_end_golds.append(old_inputs['end_positions'].detach().cpu().numpy())
+
+        return (loss, outputs) if return_outputs else loss
+
+    def get_train_dataloader(self) -> DataLoader:
+        """
+        Returns the training :class:`~torch.utils.data.DataLoader`.
+
+        Will use no sampler if :obj:`self.train_dataset` does not implement :obj:`__len__`, a random sampler (adapted
+        to distributed training if necessary) otherwise.
+
+        Subclass and override this method if you want to inject some custom behavior.
+        """
+        if self.train_dataset is None:
+            raise ValueError("Trainer: training requires a train_dataset.")
+
+        train_dataset = self.train_dataset
+        # print("\n\n\n***************** train_dataset 1:", train_dataset)
+        # if is_datasets_available() and isinstance(train_dataset, datasets.Dataset):
+        #     train_dataset = self._remove_unused_columns(train_dataset, description="training")
+
+        if isinstance(train_dataset, torch.utils.data.IterableDataset):
+            if self.args.world_size > 1:
+                train_dataset = IterableDatasetShard(
+                    train_dataset,
+                    batch_size=self.args.train_batch_size,
+                    drop_last=self.args.dataloader_drop_last,
+                    num_processes=self.args.world_size,
+                    process_index=self.args.process_index,
+                )
+
+            return DataLoader(
+                train_dataset,
+                batch_size=self.args.train_batch_size,
+                collate_fn=self.data_collator,
+                num_workers=self.args.dataloader_num_workers,
+                pin_memory=self.args.dataloader_pin_memory,
+            )
+
+        train_sampler = self._get_train_sampler()
+
+        return DataLoader(
+            train_dataset,
+            batch_size=self.args.train_batch_size,
+            sampler=train_sampler,
+            collate_fn=self.data_collator,
+            drop_last=self.args.dataloader_drop_last,
+            num_workers=self.args.dataloader_num_workers,
+            pin_memory=self.args.dataloader_pin_memory,
+        )
 
     def evaluate(self,
                  eval_dataset=None,  # denotes the dataset after mapping

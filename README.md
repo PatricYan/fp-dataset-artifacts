@@ -2,6 +2,8 @@
 
 Project by Kaj Bostrom, Jifan Chen, and Greg Durrett. Code by Kaj Bostrom and Jifan Chen.
 
+Modified by Pengfei Yan.
+
 ## Getting Started
 You'll need Python >= 3.6 to run the code in this repo.
 
@@ -70,3 +72,65 @@ This command looks slightly different if you're not using `bash` on Linux. The [
 Once you've activated your virtual environment, you can use `pip` to install packages the way you normally would, but the installed
 packages will stay in the virtual environment instead of your global Python installation. Only the virtual environment's Python
 executable will be able to see these packages.
+
+# train and evaluate
+**1.1**
+- train
+```shell
+python3 run.py --do_train --task qa --dataset ./squad-retrain-data/train-v1.1.json --output_dir ./trained_model_v_1/
+```
+- evaluate
+```shell
+# squad
+python3 run.py --do_eval --task qa --dataset squad --model ./trained_model_v_1/ --output_dir ./eval_output_v_1/
+
+# squad_adversarial:AddSent
+python3 run.py --do_eval --task qa --dataset squad_adversarial:AddSent --model ./trained_model_v_1/ --output_dir ./eval_output_v_1_adversarial_AddSent/
+
+# squad_adversarial:AddOneSent
+python3 run.py --do_eval --task qa --dataset squad_adversarial:AddOneSent --model ./trained_model_v_1/ --output_dir ./eval_output_v_1_adversarial_AddOneSent/
+```
+
+**2.0**
+- train
+```shell
+# using adversarial retrain 
+python3 run.py --do_train --task qa --dataset ./squad-retrain-data/train-v2.0.json --output_dir ./trained_model_v_2
+```
+
+- evaluate
+```shell
+# squad
+python3 run.py --do_eval --task qa --dataset squad --model ./trained_model_v_2/ --output_dir ./eval_output_v_2/
+
+# squad_adversarial:AddSent
+python3 run.py --do_eval --task qa --dataset squad_adversarial:AddSent --model ./trained_model_v_2/ --output_dir ./eval_output_v_2_adversarial_AddSent/
+
+# squad_adversarial:AddOneSent
+python3 run.py --do_eval --task qa --dataset squad_adversarial:AddOneSent --model ./trained_model_v_2/ --output_dir ./eval_output_v_2_adversarial_AddOneSent/
+```
+
+
+# [Plot](https://github.com/allenai/cartography)
+**1.1**
+- start position
+```shell
+python3 -m selection.train_dy_filtering --plot --model_dir ./trained_model_v_1/start_pos/ --model ELECTRA-small-start-pos --burn_out 3
+```
+
+- end position
+```shell
+python3 -m selection.train_dy_filtering --plot --model_dir ./trained_model_v_1/end_pos/ --model ELECTRA-small-end-pos --burn_out 3
+```
+
+**2.0**
+- start position
+```shell
+# plot start pos
+python3 -m selection.train_dy_filtering --plots_dir cartography_v_2 --plot --model_dir ./trained_model_v_2/start_pos --model ELECTRA-small-start-pos --burn_out 3
+```
+- end position
+```shell
+# plot end pos
+python3 -m selection.train_dy_filtering --plots_dir cartography_v_2 --plot --model_dir ./trained_model_v_2/end_pos --model ELECTRA-small-end-pos --burn_out 3
+```

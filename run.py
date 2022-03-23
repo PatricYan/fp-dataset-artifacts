@@ -1,10 +1,11 @@
 import datasets
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, \
-    AutoModelForQuestionAnswering, Trainer, TrainingArguments, HfArgumentParser
+    AutoModelForQuestionAnswering, Trainer, TrainingArguments, HfArgumentParser, TrainerCallback
 from helpers import prepare_dataset_nli, prepare_train_dataset_qa, \
-    prepare_validation_dataset_qa, QuestionAnsweringTrainer, compute_accuracy
+    prepare_validation_dataset_qa, QuestionAnsweringTrainer, compute_accuracy, MyCallback
 import os
 import json
+from selection.selection_utils import log_training_dynamics
 
 NUM_PREPROCESSING_WORKERS = 2
 
@@ -47,13 +48,15 @@ def main():
     argp.add_argument('--max_eval_samples', type=int, default=None,
                       help='Limit the number of examples to evaluate on.')
 
+    argp.remove_unused_columns = False
     training_args, args = argp.parse_args_into_dataclasses()
 
     # Dataset selection
     if args.dataset.endswith('.json') or args.dataset.endswith('.jsonl'):
         dataset_id = None
         # Load from local json/jsonl file
-        dataset = datasets.load_dataset('json', data_files=args.dataset)
+        dataset = datasets.load_dataset('json', data_files=args.dataset, field="data")
+        dataset = dataset.map(process_squad, batched=True, remove_columns=["paragraphs"])
         # By default, the "json" dataset loader places all examples in the train split,
         # so if we want to use a jsonl file for evaluation we need to get the "train" split
         # from the loaded dataset
@@ -66,7 +69,6 @@ def main():
         eval_split = 'validation_matched' if dataset_id == ('glue', 'mnli') else 'validation'
         # Load the raw data
         dataset = datasets.load_dataset(*dataset_id)
-    
     # NLI models need to have the output label count specified (label 0 is "entailed", 1 is "neutral", and 2 is "contradiction")
     task_kwargs = {'num_labels': 3} if args.task == 'nli' else {}
 
@@ -77,7 +79,7 @@ def main():
     # Initialize the model and tokenizer from the specified pretrained model/checkpoint
     model = model_class.from_pretrained(args.model, **task_kwargs)
     tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=True)
-
+    # print("\n\n**************** tokenizer:", tokenizer)
     # Select the dataset preprocessing function (these functions are defined in helpers.py)
     if args.task == 'qa':
         prepare_train_dataset = lambda exs: prepare_train_dataset_qa(exs, tokenizer)
@@ -93,7 +95,6 @@ def main():
     if dataset_id == ('snli',):
         # remove SNLI examples with no label
         dataset = dataset.filter(lambda ex: ex['label'] != -1)
-    
     train_dataset = None
     eval_dataset = None
     train_dataset_featurized = None
@@ -108,6 +109,9 @@ def main():
             num_proc=NUM_PREPROCESSING_WORKERS,
             remove_columns=train_dataset.column_names
         )
+        # print("\n\n\n***************** train_dataset:", train_dataset)
+        # print("\n\n\n***************** train_dataset_featurized:", train_dataset_featurized)
+
     if training_args.do_eval:
         eval_dataset = dataset[eval_split]
         if args.max_eval_samples:
@@ -135,7 +139,6 @@ def main():
             predictions=eval_preds.predictions, references=eval_preds.label_ids)
     elif args.task == 'nli':
         compute_metrics = compute_accuracy
-    
 
     # This function wraps the compute_metrics function, storing the model's predictions
     # so that they can be dumped along with the computed metrics
@@ -154,6 +157,12 @@ def main():
         tokenizer=tokenizer,
         compute_metrics=compute_metrics_and_store_predictions
     )
+
+    callback=MyCallback(trainer)
+
+    trainer.add_callback(callback)
+    # print("\n\n******************* args:", training_args)
+
     # Train and/or evaluate
     if training_args.do_train:
         trainer.train()
@@ -198,6 +207,33 @@ def main():
                     example_with_prediction['predicted_label'] = int(eval_predictions.predictions[i].argmax())
                     f.write(json.dumps(example_with_prediction))
                     f.write('\n')
+
+def process_squad(articles):
+    out = {
+        "id": [],
+        "title": [],
+        "context": [],
+        "question": [],
+        "answers": [],
+    }
+    count=1
+    for title, paragraphs in zip(articles["title"], articles["paragraphs"]):
+        for paragraph in paragraphs:
+            for qa in paragraph["qas"]:
+                # out["id"].append(qa["id"])
+                out["id"].append(count)
+                count+=1
+                out["title"].append(title)
+                out["context"].append(paragraph["context"])
+                out["question"].append(qa["question"])
+                out["answers"].append({
+                    "answer_start": [answer["answer_start"] for answer in qa["answers"]],
+                    "text": [answer["text"] for answer in qa["answers"]],
+                })
+
+
+    return out
+
 
 
 if __name__ == "__main__":
