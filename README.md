@@ -111,7 +111,7 @@ python3 run.py --do_eval --task qa --dataset squad_adversarial:AddOneSent --mode
 ```
 
 
-# [Plot](https://github.com/allenai/cartography)
+# [Plot by cartography](https://github.com/allenai/cartography)
 **1.1**
 - start position
 ```shell
